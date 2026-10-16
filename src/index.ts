@@ -1,4 +1,4 @@
-/** telegram-serverless Worker: upload intake + channels + captions. T1–T4 slice.
+/** telegram-serverless Worker: upload intake + channels + captions + series. T1–T5 slice.
  *
  * Routes implemented here:
  *   GET  /healthz
@@ -11,9 +11,18 @@
  *   DELETE /channels/:id      remove (publish_jobs.channel_id SET NULLs)
  *   POST /channels/:id/verify call getChat to prove the bot sees the chat
  *   POST /captions/preview    render caption + title line without any DB writes
+ *   GET  /series              list series (created_at order)
+ *   POST /series              create a series (slug unique → 409)
+ *   GET  /series/:id          fetch one series
+ *   PATCH /series/:id         partial update (slug unique → 409)
+ *   DELETE /series/:id        remove (parts cascade)
+ *   GET  /series/:id/channels resolve the per-series channel pick
+ *   GET  /series/:id/parts    list parts in episode order
+ *   POST /series/:id/parts    attach an asset as an episode (index/asset unique → 409)
+ *   GET|PATCH|DELETE /series/:id/parts/:partId  part detail / edit / detach
+ *   GET  /series/:id/parts/:partId/caption  render this episode's caption
  *
- * Coming in later slices: series (T5), slots/backlog/tick (T6),
- * console wiring (T7).
+ * Coming in later slices: slots/backlog/tick (T6), console wiring (T7).
  */
 
 import { Hono } from "hono";
@@ -33,8 +42,32 @@ import {
   validateChannelCreate,
   validateChannelPatch,
 } from "./channels";
-import { getAssetByStorageKey, insertAsset } from "./db";
+import { getAssetById, getAssetByStorageKey, insertAsset } from "./db";
 import { type R2Credentials, presignedPutUrl } from "./r2";
+import {
+  SeriesValidationError,
+  assertChannelsExist,
+  deletePart,
+  deleteSeries,
+  getPartByAssetId,
+  getPartById,
+  getPartBySeriesAndIndex,
+  getSeriesById,
+  insertPart,
+  insertSeries,
+  isPartConflict,
+  isSlugConflict,
+  listParts,
+  listSeries,
+  seriesPartStats,
+  type SeriesPart,
+  updatePart,
+  updateSeries,
+  validatePartCreate,
+  validatePartPatch,
+  validateSeriesCreate,
+  validateSeriesPatch,
+} from "./series";
 import { TelegramApiError, getChat } from "./telegram";
 import {
   ALLOWED_CONTENT_TYPE,
@@ -303,6 +336,312 @@ app.post("/captions/preview", async (c) => {
       { part_index: partIndex, total, hook },
     );
     return c.json({ ...rendered, within_limit: rendered.caption_length <= 1024 });
+  } catch (err) {
+    if (err instanceof CaptionValidationError) {
+      return c.json(errorBody(err.code, err.message), err.status as 400);
+    }
+    throw err;
+  }
+});
+
+function seriesError(err: unknown): { code: string; message: string; status: number } | null {
+  if (err instanceof SeriesValidationError) {
+    return { code: err.code, message: err.message, status: err.status };
+  }
+  return null;
+}
+
+app.get("/series", async (c) => {
+  return c.json(await listSeries(c.env.DB));
+});
+
+app.post("/series", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validateSeriesCreate(body);
+    await assertChannelsExist(c.env.DB, validated.channelIds);
+  } catch (err) {
+    const mapped = seriesError(err);
+    if (mapped) return c.json(errorBody(mapped.code, mapped.message), mapped.status as 400);
+    throw err;
+  }
+  try {
+    const series = await insertSeries(c.env.DB, { id: crypto.randomUUID(), ...validated });
+    return c.json(series, 201);
+  } catch (err) {
+    if (isSlugConflict(err)) {
+      return c.json(errorBody("slug_taken", "a series with this slug already exists"), 409);
+    }
+    throw err;
+  }
+});
+
+app.get("/series/:id", async (c) => {
+  const series = await getSeriesById(c.env.DB, c.req.param("id"));
+  if (!series) {
+    return c.json(errorBody("series_not_found", "no series with this id"), 404);
+  }
+  return c.json(series);
+});
+
+app.patch("/series/:id", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validateSeriesPatch(body);
+    if (validated.channelIds !== undefined) {
+      await assertChannelsExist(c.env.DB, validated.channelIds);
+    }
+    if (validated.totalParts !== undefined && validated.totalParts !== null) {
+      const stats = await seriesPartStats(c.env.DB, c.req.param("id"));
+      if (stats.maxIndex !== null && validated.totalParts < stats.maxIndex) {
+        return c.json(
+          errorBody(
+            "total_below_parts",
+            `total_parts ${validated.totalParts} is below the highest attached part (${stats.maxIndex})`,
+          ),
+          400,
+        );
+      }
+    }
+  } catch (err) {
+    const mapped = seriesError(err);
+    if (mapped) return c.json(errorBody(mapped.code, mapped.message), mapped.status as 400);
+    throw err;
+  }
+  try {
+    const series = await updateSeries(c.env.DB, c.req.param("id"), validated);
+    if (!series) {
+      return c.json(errorBody("series_not_found", "no series with this id"), 404);
+    }
+    return c.json(series);
+  } catch (err) {
+    if (isSlugConflict(err)) {
+      return c.json(errorBody("slug_taken", "a series with this slug already exists"), 409);
+    }
+    throw err;
+  }
+});
+
+app.delete("/series/:id", async (c) => {
+  const deleted = await deleteSeries(c.env.DB, c.req.param("id"));
+  if (!deleted) {
+    return c.json(errorBody("series_not_found", "no series with this id"), 404);
+  }
+  return c.body(null, 204);
+});
+
+app.get("/series/:id/channels", async (c) => {
+  const series = await getSeriesById(c.env.DB, c.req.param("id"));
+  if (!series) {
+    return c.json(errorBody("series_not_found", "no series with this id"), 404);
+  }
+  const channels = [];
+  const missingIds = [];
+  for (const channelId of series.channel_ids) {
+    const channel = await getChannelById(c.env.DB, channelId);
+    if (channel) channels.push(channel);
+    else missingIds.push(channelId);
+  }
+  return c.json({ channels, missing_ids: missingIds });
+});
+
+app.get("/series/:id/parts", async (c) => {
+  const series = await getSeriesById(c.env.DB, c.req.param("id"));
+  if (!series) {
+    return c.json(errorBody("series_not_found", "no series with this id"), 404);
+  }
+  return c.json(await listParts(c.env.DB, series.id));
+});
+
+app.post("/series/:id/parts", async (c) => {
+  const series = await getSeriesById(c.env.DB, c.req.param("id"));
+  if (!series) {
+    return c.json(errorBody("series_not_found", "no series with this id"), 404);
+  }
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validatePartCreate(body);
+  } catch (err) {
+    const mapped = seriesError(err);
+    if (mapped) return c.json(errorBody(mapped.code, mapped.message), mapped.status as 400);
+    throw err;
+  }
+  if (!(await getAssetById(c.env.DB, validated.assetId))) {
+    return c.json(errorBody("asset_not_found", "no asset with this asset_id"), 404);
+  }
+  if (series.total_parts !== null && validated.partIndex > series.total_parts) {
+    return c.json(
+      errorBody(
+        "part_beyond_total",
+        `part_index ${validated.partIndex} exceeds the series total of ${series.total_parts}`,
+      ),
+      400,
+    );
+  }
+  if (await getPartBySeriesAndIndex(c.env.DB, series.id, validated.partIndex)) {
+    return c.json(
+      errorBody("part_index_taken", `part ${validated.partIndex} is already attached`),
+      409,
+    );
+  }
+  if (await getPartByAssetId(c.env.DB, validated.assetId)) {
+    return c.json(
+      errorBody("asset_already_attached", "this asset is already attached to a part"),
+      409,
+    );
+  }
+  try {
+    const part = await insertPart(c.env.DB, {
+      id: crypto.randomUUID(),
+      seriesId: series.id,
+      ...validated,
+    });
+    return c.json(part, 201);
+  } catch (err) {
+    if (isPartConflict(err)) {
+      return c.json(
+        errorBody("part_conflict", "part_index or asset_id is already attached"),
+        409,
+      );
+    }
+    throw err;
+  }
+});
+
+async function getOwnedPart(
+  db: D1Database,
+  seriesId: string,
+  partId: string,
+): Promise<{ status: "ok"; part: SeriesPart } | { status: number }> {
+  const series = await getSeriesById(db, seriesId);
+  if (!series) return { status: 404 };
+  const part = await getPartById(db, partId);
+  if (!part || part.series_id !== seriesId) return { status: 404 };
+  return { status: "ok", part };
+}
+
+app.get("/series/:id/parts/:partId", async (c) => {
+  const owned = await getOwnedPart(c.env.DB, c.req.param("id"), c.req.param("partId"));
+  if (owned.status !== "ok") {
+    return c.json(errorBody("part_not_found", "no such part in this series"), 404);
+  }
+  return c.json(owned.part);
+});
+
+app.patch("/series/:id/parts/:partId", async (c) => {
+  const owned = await getOwnedPart(c.env.DB, c.req.param("id"), c.req.param("partId"));
+  if (owned.status !== "ok") {
+    return c.json(errorBody("part_not_found", "no such part in this series"), 404);
+  }
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validatePartPatch(body);
+  } catch (err) {
+    const mapped = seriesError(err);
+    if (mapped) return c.json(errorBody(mapped.code, mapped.message), mapped.status as 400);
+    throw err;
+  }
+  const series = await getSeriesById(c.env.DB, c.req.param("id"));
+  if (validated.partIndex !== undefined && validated.partIndex !== owned.part.part_index) {
+    if (series?.total_parts != null && validated.partIndex > series.total_parts) {
+      return c.json(
+        errorBody(
+          "part_beyond_total",
+          `part_index ${validated.partIndex} exceeds the series total of ${series.total_parts}`,
+        ),
+        400,
+      );
+    }
+    const clash = await getPartBySeriesAndIndex(c.env.DB, c.req.param("id"), validated.partIndex);
+    if (clash && clash.id !== c.req.param("partId")) {
+      return c.json(
+        errorBody("part_index_taken", `part ${validated.partIndex} is already attached`),
+        409,
+      );
+    }
+  }
+  try {
+    const part = await updatePart(c.env.DB, c.req.param("partId"), validated);
+    if (!part) {
+      return c.json(errorBody("part_not_found", "no such part in this series"), 404);
+    }
+    return c.json(part);
+  } catch (err) {
+    if (isPartConflict(err)) {
+      return c.json(
+        errorBody("part_conflict", "part_index or asset_id is already attached"),
+        409,
+      );
+    }
+    throw err;
+  }
+});
+
+app.delete("/series/:id/parts/:partId", async (c) => {
+  const owned = await getOwnedPart(c.env.DB, c.req.param("id"), c.req.param("partId"));
+  if (owned.status !== "ok") {
+    return c.json(errorBody("part_not_found", "no such part in this series"), 404);
+  }
+  await deletePart(c.env.DB, c.req.param("partId"));
+  return c.body(null, 204);
+});
+
+app.get("/series/:id/parts/:partId/caption", async (c) => {
+  const seriesId = c.req.param("id");
+  const series = await getSeriesById(c.env.DB, seriesId);
+  if (!series) {
+    return c.json(errorBody("series_not_found", "no series with this id"), 404);
+  }
+  const part = await getPartById(c.env.DB, c.req.param("partId"));
+  if (!part || part.series_id !== seriesId) {
+    return c.json(errorBody("part_not_found", "no such part in this series"), 404);
+  }
+  let total = series.total_parts;
+  if (total === null) {
+    const stats = await seriesPartStats(c.env.DB, seriesId);
+    total = stats.maxIndex ?? part.part_index;
+  }
+  try {
+    const rendered = renderEpisode(
+      {
+        title_local: series.title_local,
+        title_en: series.title_en,
+        synopsis: series.synopsis,
+        language: series.language,
+        style_example: series.style_example,
+        caption_template: series.caption_template,
+        title_template: series.title_template,
+        next_teaser_template: series.next_teaser_template,
+        hashtags:
+          typeof series.hashtags === "string" ? series.hashtags : normaliseHashtags(series.hashtags),
+      },
+      { part_index: part.part_index, total, hook: part.hook },
+    );
+    return c.json({
+      ...rendered,
+      within_limit: rendered.caption_length <= 1024,
+      series_id: seriesId,
+      part_id: part.id,
+      asset_id: part.asset_id,
+      part_index: part.part_index,
+      total,
+    });
   } catch (err) {
     if (err instanceof CaptionValidationError) {
       return c.json(errorBody(err.code, err.message), err.status as 400);

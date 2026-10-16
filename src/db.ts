@@ -37,3 +37,10 @@ export async function getAssetByStorageKey(
     .bind(storageKey)
     .first<AssetRow>();
 }
+
+export async function getAssetById(db: D1Database, id: string): Promise<AssetRow | null> {
+  return await db
+    .prepare("SELECT id, storage_key, size_bytes, created_at FROM assets WHERE id = ?")
+    .bind(id)
+    .first<AssetRow>();
+}

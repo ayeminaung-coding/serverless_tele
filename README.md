@@ -25,7 +25,7 @@ no chunked resumable uploads, no ffmpeg.
 - [x] T2 — presigned upload + 50 MB guard + asset registration
 - [x] T3 — Telegram `sendVideo` client + channels CRUD
 - [x] T4 — caption render (template + hook, 1024 cap) + preview
-- [ ] T5 — series CRUD + parts + per-series channel pick
+- [x] T5 — series CRUD + parts + per-series channel pick
 - [ ] T6 — slots + ordered backlog + tick release
 - [ ] T7 — console wiring (Pages build against this API)
 - [ ] T8 — full test/docs pass + live verification checklist
@@ -52,7 +52,7 @@ npx wrangler secret put R2_SECRET_ACCESS_KEY
 npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
 ```
 
-## API (T1–T4)
+## API (T1–T5)
 
 - `GET /healthz` → `{status, version}`
 - `POST /assets/upload-url` `{filename, content_type?, size_bytes?}` →
@@ -72,6 +72,19 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
   `{caption, title, next_teaser, caption_length, unfitted_length, truncated, within_limit}`
   (pure render, no DB writes; caption always fits 1024, `truncated` warns when cut;
   final part renders no teaser; unknown `{placeholders}` stay verbatim)
+- `GET /series` → `[{id, slug, title_local, title_en, synopsis, language, total_parts, hashtags, channel_ids, …}]`
+- `POST /series` `{slug, title_local?, title_en?, synopsis?, language?, style_example?, total_parts?, caption_template?, title_template?, next_teaser_template?, hashtags?, channel_ids?}` → `201`
+  (`slug` kebab-case unique → `409`; unknown channel ids → `400`; hashtags as string or object)
+- `GET /series/:id` → series or `404`
+- `PATCH /series/:id` → partial update (`409` on slug clash; `400` when shrinking
+  `total_parts` below attached parts)
+- `DELETE /series/:id` → `204` or `404` (parts cascade)
+- `GET /series/:id/channels` → `{channels: [...], missing_ids: [...]}` (pick in order; stale ids reported)
+- `GET /series/:id/parts` → parts in episode order
+- `POST /series/:id/parts` `{asset_id, part_index, hook?, source_filename?}` → `201`
+  (asset must exist; `part_index` unique per series → `409`; asset one-part-only → `409`)
+- `GET|PATCH|DELETE /series/:id/parts/:partId` → detail / edit hook+index / detach
+- `GET /series/:id/parts/:partId/caption` → this episode's rendered caption via T4 engine
 
 ## Verify this slice
 
