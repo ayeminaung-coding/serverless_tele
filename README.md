@@ -23,7 +23,7 @@ no chunked resumable uploads, no ffmpeg.
 
 - [x] T1 — wrangler config, D1 schema, channel/job/series/slot tables
 - [x] T2 — presigned upload + 50 MB guard + asset registration
-- [ ] T3 — Telegram `sendVideo` client + channels CRUD
+- [x] T3 — Telegram `sendVideo` client + channels CRUD
 - [ ] T4 — caption render (template + hook, 1024 cap) + preview
 - [ ] T5 — series CRUD + parts + per-series channel pick
 - [ ] T6 — slots + ordered backlog + tick release
@@ -52,7 +52,7 @@ npx wrangler secret put R2_SECRET_ACCESS_KEY
 npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
 ```
 
-## API (T1+T2)
+## API (T1+T2+T3)
 
 - `GET /healthz` → `{status, version}`
 - `POST /assets/upload-url` `{filename, content_type?, size_bytes?}` →
@@ -60,6 +60,14 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
   content type, declared size >50 MB)
 - `POST /assets` `{storage_key}` → `201` asset (verifies via R2 HEAD;
   oversized objects are deleted and rejected with 413)
+- `GET /channels` → `[{id, label, chat_id, is_public, protect_content, enabled, created_at}]`
+- `POST /channels` `{label, chat_id, is_public?, protect_content?, enabled?}` → `201`
+  channel (`chat_id` is `@handle` or numeric `-100…`; duplicates → `409`)
+- `GET /channels/:id` → channel or `404`
+- `PATCH /channels/:id` → partial update or `404` (`409` on `chat_id` clash)
+- `DELETE /channels/:id` → `204` or `404`
+- `POST /channels/:id/verify` → `{ok:true, channel, chat}` via Telegram `getChat`
+  (`503` without `TELEGRAM_BOT_TOKEN`; `403` when the bot can't see the chat)
 
 ## Verify this slice
 

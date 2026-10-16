@@ -1,17 +1,35 @@
-/** telegram-serverless Worker: upload intake + health. T1+T2 slice.
+/** telegram-serverless Worker: upload intake + channels. T1+T2+T3 slice.
  *
  * Routes implemented here:
  *   GET  /healthz
  *   POST /assets/upload-url   mint a presigned R2 PUT (validated, pre-encoded .mp4 only)
  *   POST /assets              verify the uploaded object (R2 HEAD) and register it
+ *   GET  /channels            list channels (created_at order)
+ *   POST /channels            create a channel (chat_id unique → 409)
+ *   GET  /channels/:id        fetch one channel
+ *   PATCH /channels/:id       partial update (chat_id unique → 409)
+ *   DELETE /channels/:id      remove (publish_jobs.channel_id SET NULLs)
+ *   POST /channels/:id/verify call getChat to prove the bot sees the chat
  *
- * Coming in later slices: channels CRUD (T3), sendVideo client (T3), caption
- * render + preview (T4), series (T5), slots/backlog/tick (T6), console wiring (T7).
+ * Coming in later slices: caption render + preview (T4), series (T5),
+ * slots/backlog/tick (T6), console wiring (T7).
  */
 
 import { Hono } from "hono";
+import {
+  ChannelValidationError,
+  deleteChannel,
+  getChannelById,
+  insertChannel,
+  isChatIdConflict,
+  listChannels,
+  updateChannel,
+  validateChannelCreate,
+  validateChannelPatch,
+} from "./channels";
 import { getAssetByStorageKey, insertAsset } from "./db";
 import { type R2Credentials, presignedPutUrl } from "./r2";
+import { TelegramApiError, getChat } from "./telegram";
 import {
   ALLOWED_CONTENT_TYPE,
   UploadValidationError,
@@ -29,9 +47,13 @@ export interface Env {
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
   R2_PUBLIC_BASE_URL: string;
+  TELEGRAM_BOT_TOKEN?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
+
+/** Exported for route-level tests (app.request with a stub D1). */
+export { app };
 
 function errorBody(code: string, message: string): { error: { code: string; message: string } } {
   return { error: { code, message } };
@@ -126,6 +148,122 @@ app.post("/assets", async (c) => {
     sizeBytes: head.size,
   });
   return c.json(asset, 201);
+});
+
+app.get("/channels", async (c) => {
+  return c.json(await listChannels(c.env.DB));
+});
+
+app.post("/channels", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validateChannelCreate({
+      label: body["label"],
+      chat_id: body["chat_id"],
+      is_public: body["is_public"],
+      protect_content: body["protect_content"],
+      enabled: body["enabled"],
+    });
+  } catch (err) {
+    if (err instanceof ChannelValidationError) {
+      return c.json(errorBody(err.code, err.message), err.status as 400);
+    }
+    throw err;
+  }
+  try {
+    const channel = await insertChannel(c.env.DB, { id: crypto.randomUUID(), ...validated });
+    return c.json(channel, 201);
+  } catch (err) {
+    if (isChatIdConflict(err)) {
+      return c.json(errorBody("chat_id_taken", "a channel with this chat_id already exists"), 409);
+    }
+    throw err;
+  }
+});
+
+app.get("/channels/:id", async (c) => {
+  const channel = await getChannelById(c.env.DB, c.req.param("id"));
+  if (!channel) {
+    return c.json(errorBody("channel_not_found", "no channel with this id"), 404);
+  }
+  return c.json(channel);
+});
+
+app.patch("/channels/:id", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validateChannelPatch({
+      label: body["label"],
+      chat_id: body["chat_id"],
+      is_public: body["is_public"],
+      protect_content: body["protect_content"],
+      enabled: body["enabled"],
+    });
+  } catch (err) {
+    if (err instanceof ChannelValidationError) {
+      return c.json(errorBody(err.code, err.message), err.status as 400);
+    }
+    throw err;
+  }
+  try {
+    const channel = await updateChannel(c.env.DB, c.req.param("id"), validated);
+    if (!channel) {
+      return c.json(errorBody("channel_not_found", "no channel with this id"), 404);
+    }
+    return c.json(channel);
+  } catch (err) {
+    if (isChatIdConflict(err)) {
+      return c.json(errorBody("chat_id_taken", "a channel with this chat_id already exists"), 409);
+    }
+    throw err;
+  }
+});
+
+app.delete("/channels/:id", async (c) => {
+  const deleted = await deleteChannel(c.env.DB, c.req.param("id"));
+  if (!deleted) {
+    return c.json(errorBody("channel_not_found", "no channel with this id"), 404);
+  }
+  return c.body(null, 204);
+});
+
+app.post("/channels/:id/verify", async (c) => {
+  const channel = await getChannelById(c.env.DB, c.req.param("id"));
+  if (!channel) {
+    return c.json(errorBody("channel_not_found", "no channel with this id"), 404);
+  }
+  const token = c.env.TELEGRAM_BOT_TOKEN ?? "";
+  if (!token) {
+    return c.json(
+      errorBody("bot_token_missing", "TELEGRAM_BOT_TOKEN is not configured"),
+      503,
+    );
+  }
+  try {
+    const chat = await getChat(token, channel.chat_id);
+    return c.json({ ok: true, channel, chat });
+  } catch (err) {
+    if (err instanceof TelegramApiError) {
+      const status =
+        err.code === "telegram_rate_limited" ? 429 : err.code === "telegram_forbidden" ? 403 : 502;
+      const body: Record<string, unknown> = {
+        error: { code: err.code, message: err.message },
+      };
+      if (err.retryAfterSeconds !== undefined) {
+        body["retry_after_seconds"] = err.retryAfterSeconds;
+      }
+      return c.json(body, status as 400);
+    }
+    throw err;
+  }
 });
 
 export default {
