@@ -208,3 +208,50 @@ export function normaliseHashtags(raw: unknown): string {
   }
   return "";
 }
+
+/** Series material for the shared episode render below. Structural (not the
+ * `Series` row type) so `series.ts` stays the importer, never the imported. */
+export interface PartCaptionSeries {
+  title_local: string;
+  title_en: string;
+  synopsis: string;
+  language: string;
+  style_example: string;
+  caption_template: string;
+  title_template: string;
+  next_teaser_template: string;
+  hashtags: string | Record<string, string>;
+  total_parts: number | null;
+}
+
+export interface PartCaptionPart {
+  part_index: number;
+  hook: string;
+}
+
+/** Shared episode render for the T5 caption endpoint and the T6 tick, so a
+ * stored job caption always matches the preview. `total` resolves from the
+ * override first, then the series total, then the part itself. */
+export function renderPartCaption(
+  series: PartCaptionSeries,
+  part: PartCaptionPart,
+  totalOverride?: number | null,
+): RenderedEpisode {
+  const total = totalOverride ?? series.total_parts ?? part.part_index;
+  const hashtags =
+    typeof series.hashtags === "string" ? series.hashtags : normaliseHashtags(series.hashtags);
+  return renderEpisode(
+    {
+      title_local: series.title_local,
+      title_en: series.title_en,
+      synopsis: series.synopsis,
+      language: series.language,
+      style_example: series.style_example,
+      caption_template: series.caption_template,
+      title_template: series.title_template,
+      next_teaser_template: series.next_teaser_template,
+      hashtags,
+    },
+    { part_index: part.part_index, total, hook: part.hook },
+  );
+}

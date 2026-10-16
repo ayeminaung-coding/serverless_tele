@@ -30,6 +30,7 @@ import {
   CaptionValidationError,
   normaliseHashtags,
   renderEpisode,
+  renderPartCaption,
 } from "./caption";
 import {
   ChannelValidationError,
@@ -43,6 +44,17 @@ import {
   validateChannelPatch,
 } from "./channels";
 import { getAssetById, getAssetByStorageKey, insertAsset } from "./db";
+import {
+  SlotValidationError,
+  getJobById,
+  listJobsEnriched,
+  listSlots,
+  markJob,
+  runTick,
+  sendJob,
+  updateSlot,
+  validateSlotPatch,
+} from "./publish";
 import { type R2Credentials, presignedPutUrl } from "./r2";
 import {
   SeriesValidationError,
@@ -618,21 +630,8 @@ app.get("/series/:id/parts/:partId/caption", async (c) => {
     total = stats.maxIndex ?? part.part_index;
   }
   try {
-    const rendered = renderEpisode(
-      {
-        title_local: series.title_local,
-        title_en: series.title_en,
-        synopsis: series.synopsis,
-        language: series.language,
-        style_example: series.style_example,
-        caption_template: series.caption_template,
-        title_template: series.title_template,
-        next_teaser_template: series.next_teaser_template,
-        hashtags:
-          typeof series.hashtags === "string" ? series.hashtags : normaliseHashtags(series.hashtags),
-      },
-      { part_index: part.part_index, total, hook: part.hook },
-    );
+    // Shared with the T6 tick so stored job captions match this preview.
+    const rendered = renderPartCaption(series, part, total);
     return c.json({
       ...rendered,
       within_limit: rendered.caption_length <= 1024,
@@ -650,10 +649,106 @@ app.get("/series/:id/parts/:partId/caption", async (c) => {
   }
 });
 
+app.get("/slots", async (c) => {
+  return c.json(await listSlots(c.env.DB));
+});
+
+app.patch("/slots/:id", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  let validated;
+  try {
+    validated = validateSlotPatch(body);
+  } catch (err) {
+    if (err instanceof SlotValidationError) {
+      return c.json(errorBody(err.code, err.message), err.status as 400);
+    }
+    throw err;
+  }
+  const slot = await updateSlot(c.env.DB, c.req.param("id"), validated);
+  if (!slot) {
+    return c.json(errorBody("slot_not_found", "no slot with this id"), 404);
+  }
+  return c.json(slot);
+});
+
+app.get("/jobs", async (c) => {
+  const stateRaw = c.req.query("state");
+  let state: "scheduled" | "published" | "failed" | undefined;
+  if (stateRaw !== undefined) {
+    if (stateRaw !== "scheduled" && stateRaw !== "published" && stateRaw !== "failed") {
+      return c.json(
+        errorBody("invalid_state", "state must be scheduled, published, or failed"),
+        400,
+      );
+    }
+    state = stateRaw;
+  }
+  let limit = 50;
+  const limitRaw = c.req.query("limit");
+  if (limitRaw !== undefined) {
+    const parsed = Number(limitRaw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return c.json(errorBody("invalid_limit", "limit must be a positive integer"), 400);
+    }
+    limit = Math.min(parsed, 200);
+  }
+  return c.json(
+    await listJobsEnriched(c.env.DB, {
+      state,
+      seriesId: c.req.query("series_id"),
+      channelId: c.req.query("channel_id"),
+      limit,
+    }),
+  );
+});
+
+app.post("/jobs/:id/retry", async (c) => {
+  const job = await getJobById(c.env.DB, c.req.param("id"));
+  if (!job) {
+    return c.json(errorBody("job_not_found", "no job with this id"), 404);
+  }
+  if (job.state !== "failed") {
+    return c.json(errorBody("job_not_failed", "only failed jobs can be retried"), 409);
+  }
+  // Resolve everything before mutating: a job whose channel/part/asset is
+  // gone cannot be dispatched.
+  const channel = job.channel_id ? await getChannelById(c.env.DB, job.channel_id) : null;
+  if (!channel) {
+    return c.json(errorBody("channel_not_found", "this job's channel no longer exists"), 404);
+  }
+  const part = await getPartByAssetId(c.env.DB, job.asset_id);
+  if (!part) {
+    return c.json(errorBody("part_not_found", "this job's asset is no longer attached"), 404);
+  }
+  const series = await getSeriesById(c.env.DB, part.series_id);
+  if (!series) {
+    return c.json(errorBody("series_not_found", "this job's series no longer exists"), 404);
+  }
+  const asset = await getAssetById(c.env.DB, job.asset_id);
+  if (!asset) {
+    return c.json(errorBody("asset_not_found", "this job's asset no longer exists"), 404);
+  }
+  const reset = await markJob(c.env.DB, job.id, {
+    state: "scheduled",
+    attempts: job.attempts,
+    lastError: null,
+    externalId: job.external_id,
+  });
+  const result = await sendJob(c.env, reset ?? job, channel, asset);
+  return c.json(result.job);
+});
+
+app.post("/tick", async (c) => {
+  return c.json(await runTick(c.env, { nowMs: Date.now() }));
+});
+
 export default {
   fetch: app.fetch,
-  /** Cron heartbeat arrives here every 15 min. Full slot tick lands in T6. */
-  async scheduled(): Promise<void> {
-    console.log("tick received: schedule release not implemented yet (T6)");
+  /** Cron heartbeat (every 15 min): the same core as POST /tick. */
+  async scheduled(_event: unknown, env: Env): Promise<void> {
+    await runTick(env, { nowMs: Date.now(), fetchImpl: fetch });
   },
 };
