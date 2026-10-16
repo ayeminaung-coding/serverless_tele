@@ -1,4 +1,4 @@
-/** telegram-serverless Worker: upload intake + channels. T1+T2+T3 slice.
+/** telegram-serverless Worker: upload intake + channels + captions. T1–T4 slice.
  *
  * Routes implemented here:
  *   GET  /healthz
@@ -10,12 +10,18 @@
  *   PATCH /channels/:id       partial update (chat_id unique → 409)
  *   DELETE /channels/:id      remove (publish_jobs.channel_id SET NULLs)
  *   POST /channels/:id/verify call getChat to prove the bot sees the chat
+ *   POST /captions/preview    render caption + title line without any DB writes
  *
- * Coming in later slices: caption render + preview (T4), series (T5),
- * slots/backlog/tick (T6), console wiring (T7).
+ * Coming in later slices: series (T5), slots/backlog/tick (T6),
+ * console wiring (T7).
  */
 
 import { Hono } from "hono";
+import {
+  CaptionValidationError,
+  normaliseHashtags,
+  renderEpisode,
+} from "./caption";
 import {
   ChannelValidationError,
   deleteChannel,
@@ -261,6 +267,45 @@ app.post("/channels/:id/verify", async (c) => {
         body["retry_after_seconds"] = err.retryAfterSeconds;
       }
       return c.json(body, status as 400);
+    }
+    throw err;
+  }
+});
+
+app.post("/captions/preview", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body) {
+    return c.json(errorBody("invalid_json", "request body must be JSON"), 400);
+  }
+  const partIndex = typeof body["part_index"] === "number" ? body["part_index"] : Number.NaN;
+  const total =
+    typeof body["total_parts"] === "number"
+      ? body["total_parts"]
+      : typeof body["total"] === "number"
+        ? body["total"]
+        : Number.NaN;
+  const hook = typeof body["hook"] === "string" ? body["hook"] : "";
+  const str = (key: string): string | undefined =>
+    typeof body[key] === "string" ? (body[key] as string) : undefined;
+  try {
+    const rendered = renderEpisode(
+      {
+        title_local: str("title_local"),
+        title_en: str("title_en"),
+        synopsis: str("synopsis"),
+        language: str("language"),
+        style_example: str("style_example"),
+        caption_template: str("caption_template"),
+        title_template: str("title_template"),
+        next_teaser_template: str("next_teaser_template"),
+        hashtags: normaliseHashtags(body["hashtags"]),
+      },
+      { part_index: partIndex, total, hook },
+    );
+    return c.json({ ...rendered, within_limit: rendered.caption_length <= 1024 });
+  } catch (err) {
+    if (err instanceof CaptionValidationError) {
+      return c.json(errorBody(err.code, err.message), err.status as 400);
     }
     throw err;
   }

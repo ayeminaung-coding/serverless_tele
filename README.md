@@ -24,7 +24,7 @@ no chunked resumable uploads, no ffmpeg.
 - [x] T1 — wrangler config, D1 schema, channel/job/series/slot tables
 - [x] T2 — presigned upload + 50 MB guard + asset registration
 - [x] T3 — Telegram `sendVideo` client + channels CRUD
-- [ ] T4 — caption render (template + hook, 1024 cap) + preview
+- [x] T4 — caption render (template + hook, 1024 cap) + preview
 - [ ] T5 — series CRUD + parts + per-series channel pick
 - [ ] T6 — slots + ordered backlog + tick release
 - [ ] T7 — console wiring (Pages build against this API)
@@ -52,7 +52,7 @@ npx wrangler secret put R2_SECRET_ACCESS_KEY
 npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
 ```
 
-## API (T1+T2+T3)
+## API (T1–T4)
 
 - `GET /healthz` → `{status, version}`
 - `POST /assets/upload-url` `{filename, content_type?, size_bytes?}` →
@@ -68,6 +68,10 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
 - `DELETE /channels/:id` → `204` or `404`
 - `POST /channels/:id/verify` → `{ok:true, channel, chat}` via Telegram `getChat`
   (`503` without `TELEGRAM_BOT_TOKEN`; `403` when the bot can't see the chat)
+- `POST /captions/preview` `{title_local?, title_en?, synopsis?, caption_template?, title_template?, next_teaser_template?, hashtags?, part_index, total_parts, hook}` →
+  `{caption, title, next_teaser, caption_length, unfitted_length, truncated, within_limit}`
+  (pure render, no DB writes; caption always fits 1024, `truncated` warns when cut;
+  final part renders no teaser; unknown `{placeholders}` stay verbatim)
 
 ## Verify this slice
 
