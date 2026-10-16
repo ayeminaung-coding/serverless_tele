@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>telegram-serverless console</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>telegram-serverless console</h1>
+    <div class="api-line">
+      <span>API: <code id="api-base-label">(unconfigured)</code></span>
+      <button id="btn-health" type="button">Check connection</button>
+      <span id="health-status" class="muted" role="status"></span>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <nav id="tabs" aria-label="Views">
+    <button type="button" class="tab-btn active" data-view="assets">Assets</button>
+    <button type="button" class="tab-btn" data-view="channels">Channels</button>
+    <button type="button" class="tab-btn" data-view="series">Series</button>
+    <button type="button" class="tab-btn" data-view="captions">Captions</button>
+    <button type="button" class="tab-btn" data-view="schedule">Schedule</button>
+  </nav>
+
+  <main>
+    <!-- 1. Assets -->
+    <section id="view-assets" class="view active">
+      <h2>Assets</h2>
+      <p class="muted">Pick a pre-encoded <code>.mp4</code> file. The console mints an
+        upload URL, PUTs the bytes straight to R2, then registers the asset.</p>
+      <div class="form-row">
+        <label>File (.mp4)
+          <input id="asset-file" type="file" accept=".mp4,video/mp4">
+        </label>
+        <button id="btn-upload" type="button">Upload + register</button>
+      </div>
+      <div id="assets-status" class="status" role="status"></div>
+      <div id="assets-result" class="result"></div>
+    </section>
+
+    <!-- 2. Channels -->
+    <section id="view-channels" class="view">
+      <h2>Channels</h2>
+      <div id="channels-status" class="status" role="status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>chat_id</th>
+              <th>Public</th>
+              <th>Protect</th>
+              <th>Enabled</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="channels-table-body"></tbody>
+        </table>
+      </div>
+      <h3>Create channel</h3>
+      <div class="form-grid">
+        <label>Label <input id="ch-label" type="text" placeholder="My channel"></label>
+        <label>chat_id <input id="ch-chat-id" type="text" placeholder="@handle or -100…"></label>
+        <label class="check"><input id="ch-is-public" type="checkbox"> is_public</label>
+        <label class="check"><input id="ch-protect" type="checkbox"> protect_content</label>
+        <label class="check"><input id="ch-enabled" type="checkbox" checked> enabled</label>
+      </div>
+      <button id="btn-channel-create" type="button">Create</button>
+      <div id="channel-create-status" class="status" role="status"></div>
+    </section>
+
+    <!-- 3. Series -->
+    <section id="view-series" class="view">
+      <h2>Series</h2>
+      <div id="series-status" class="status" role="status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Slug</th>
+              <th>Titles</th>
+              <th>Total</th>
+              <th>Channels</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="series-table-body"></tbody>
+        </table>
+      </div>
+
+      <h3>Create series</h3>
+      <div class="form-grid">
+        <label>Slug (kebab-case) <input id="s-slug" type="text" placeholder="my-show-s1"></label>
+        <label>Title (local) <input id="s-title-local" type="text"></label>
+        <label>Title (EN) <input id="s-title-en" type="text"></label>
+        <label>Language <input id="s-language" type="text" placeholder="Burmese"></label>
+        <label>Total parts <input id="s-total" type="number" min="1" max="10000" placeholder="(unset)"></label>
+        <label>Hashtags <input id="s-hashtags" type="text" placeholder="#drama #mm"></label>
+      </div>
+      <label class="block">Synopsis <textarea id="s-synopsis" rows="2"></textarea></label>
+      <label class="block">Style example <textarea id="s-style" rows="2"></textarea></label>
+      <label class="block">Caption template <textarea id="s-caption-tpl" rows="2"></textarea></label>
+      <label class="block">Title template <textarea id="s-title-tpl" rows="2"></textarea></label>
+      <label class="block">Next-teaser template <textarea id="s-teaser-tpl" rows="2"></textarea></label>
+      <fieldset>
+        <legend>Channels (pick)</legend>
+        <div id="series-channel-pick" class="checks"></div>
+      </fieldset>
+      <button id="btn-series-create" type="button">Create series</button>
+      <div id="series-create-status" class="status" role="status"></div>
+
+      <div id="series-detail" hidden>
+        <h3 id="sd-title">Series detail</h3>
+        <div id="sd-status" class="status" role="status"></div>
+        <div class="form-grid">
+          <label>Slug <input id="se-slug" type="text"></label>
+          <label>Title (local) <input id="se-title-local" type="text"></label>
+          <label>Title (EN) <input id="se-title-en" type="text"></label>
+          <label>Language <input id="se-language" type="text"></label>
+          <label>Total parts <input id="se-total" type="number" min="1" max="10000"></label>
+          <label>Hashtags <input id="se-hashtags" type="text"></label>
+        </div>
+        <label class="block">Synopsis <textarea id="se-synopsis" rows="2"></textarea></label>
+        <label class="block">Style example <textarea id="se-style" rows="2"></textarea></label>
+        <label class="block">Caption template <textarea id="se-caption-tpl" rows="2"></textarea></label>
+        <label class="block">Title template <textarea id="se-title-tpl" rows="2"></textarea></label>
+        <label class="block">Next-teaser template <textarea id="se-teaser-tpl" rows="2"></textarea></label>
+        <fieldset>
+          <legend>Channel pick</legend>
+          <div id="sd-channels" class="checks"></div>
+          <div id="sd-missing" class="warn"></div>
+        </fieldset>
+        <div class="btn-row">
+          <button id="sd-save" type="button">Save series</button>
+          <button id="sd-delete" type="button" class="danger">Delete series</button>
+          <button id="sd-close" type="button">Close</button>
+        </div>
+
+        <h4>Parts (episode order)</h4>
+        <div id="parts-status" class="status" role="status"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Asset</th>
+                <th>Hook</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="parts-table-body"></tbody>
+          </table>
+        </div>
+        <h4>Attach part</h4>
+        <div class="form-grid">
+          <label>asset_id <input id="pa-asset-id" type="text" placeholder="paste from Assets view"></label>
+          <label>part_index <input id="pa-index" type="number" min="1"></label>
+          <label>source_filename <input id="pa-source" type="text" placeholder="ep01.mp4"></label>
+        </div>
+        <label class="block">Hook <textarea id="pa-hook" rows="2"></textarea></label>
+        <button id="btn-part-attach" type="button">Attach</button>
+        <h4>Caption preview</h4>
+        <div id="part-cap-output" class="result muted">Select “Caption” on a part to preview it here.</div>
+      </div>
+    </section>
+
+    <!-- 4. Captions lab -->
+    <section id="view-captions" class="view">
+      <h2>Captions lab</h2>
+      <p class="muted">Free preview — same fields as <code>POST /captions/preview</code>.
+        Nothing is written to the DB.</p>
+      <div class="form-grid">
+        <label>Title (local) <input id="cap-title-local" type="text"></label>
+        <label>Title (EN) <input id="cap-title-en" type="text"></label>
+        <label>Language <input id="cap-language" type="text" placeholder="Burmese"></label>
+        <label>Hashtags <input id="cap-hashtags" type="text" placeholder="#drama #mm"></label>
+        <label>part_index <input id="cap-part-index" type="number" min="1" value="1"></label>
+        <label>total_parts <input id="cap-total" type="number" min="1" value="10"></label>
+      </div>
+      <label class="block">Synopsis <textarea id="cap-synopsis" rows="2"></textarea></label>
+      <label class="block">Style example <textarea id="cap-style" rows="2"></textarea></label>
+      <label class="block">Caption template <textarea id="cap-caption-tpl" rows="3"></textarea></label>
+      <label class="block">Title template <textarea id="cap-title-tpl" rows="2"></textarea></label>
+      <label class="block">Next-teaser template <textarea id="cap-teaser-tpl" rows="2"></textarea></label>
+      <label class="block">Hook <textarea id="cap-hook" rows="2"></textarea></label>
+      <button id="btn-cap-preview" type="button">Render preview</button>
+      <div id="cap-status" class="status" role="status"></div>
+      <div id="cap-meter" class="meter muted">0 / 1024</div>
+      <div id="cap-output" class="result"></div>
+    </section>
+
+    <!-- 5. Schedule -->
+    <section id="view-schedule" class="view">
+      <h2>Schedule</h2>
+
+      <h3>Slots</h3>
+      <div id="slots-status" class="status" role="status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Time</th>
+              <th>Timezone</th>
+              <th>Enabled</th>
+              <th>Last fired</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="slots-table-body"></tbody>
+        </table>
+      </div>
+
+      <h3>Jobs</h3>
+      <div class="form-grid">
+        <label>State
+          <select id="jobs-state">
+            <option value="">(any)</option>
+            <option value="scheduled">scheduled</option>
+            <option value="published">published</option>
+            <option value="failed">failed</option>
+          </select>
+        </label>
+        <label>series_id <input id="jobs-series" type="text" placeholder="(any)"></label>
+        <label>channel_id <input id="jobs-channel" type="text" placeholder="(any)"></label>
+        <label>limit <input id="jobs-limit" type="number" min="1" max="200" value="50"></label>
+      </div>
+      <button id="btn-jobs-refresh" type="button">Refresh jobs</button>
+      <div id="jobs-status" class="status" role="status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Series / part</th>
+              <th>Channel</th>
+              <th>State</th>
+              <th>Attempts</th>
+              <th>Last error</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-table-body"></tbody>
+        </table>
+      </div>
+
+      <h3>Tick</h3>
+      <button id="btn-tick" type="button">Run tick now</button>
+      <div id="tick-status" class="status" role="status"></div>
+      <div id="tick-summary" class="result"></div>
+      <h4>Last tick</h4>
+      <div id="last-tick" class="result muted">No tick run yet this session.</div>
+    </section>
+  </main>
+
+  <footer>
+    <p class="muted">Static console — no build step. Copy <code>config.example.js</code> to
+      <code>config.js</code> and set <code>API_BASE</code>.</p>
+  </footer>
+</body>
+</html>
