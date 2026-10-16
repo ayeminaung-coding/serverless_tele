@@ -26,6 +26,7 @@
  */
 
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import {
   CaptionValidationError,
   normaliseHashtags,
@@ -102,6 +103,12 @@ export interface Env {
 }
 
 const app = new Hono<{ Bindings: Env }>();
+
+// The Pages console calls this API cross-origin (pages.dev → workers.dev,
+// or localhost static server → 127.0.0.1:8787), so every route answers CORS.
+// The API carries no auth (operator puts the console behind Cloudflare
+// Access instead), so a permissive policy loses nothing curl doesn't have.
+app.use("*", cors());
 
 /** Exported for route-level tests (app.request with a stub D1). */
 export { app };

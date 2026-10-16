@@ -33,13 +33,18 @@ the directory must stay plain static files.
 
 ## Local use
 
-The console also works from `file://` for smoke testing, but browsers block
-cross-origin `fetch` from `file://`, and the Worker serves same-origin in
-production. For local use, either:
+The Worker answers CORS on every route, so run both sides locally:
 
-- `npx wrangler dev` (Worker) + a local static server for `console/`, or
-- `npx wrangler pages dev console` (Pages local), or
-- see the temp CORS note in the T8 verification slice.
+```bash
+npx wrangler dev --port 8787 &          # API on http://127.0.0.1:8787
+cp console/config.example.js console/config.js
+# set API_BASE to "http://127.0.0.1:8787" in console/config.js
+cd console && python3 -m http.server 8000   # console on http://localhost:8000
+```
+
+(`config.js` is git-ignored — never commit it.) One caveat: `POST /assets/upload-url` needs R2 credentials, so the
+Assets upload flow 503s locally until `.dev.vars` holds real R2 keys
+(`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`); everything else works offline.
 
 ## Access control (recommended, not implemented)
 
