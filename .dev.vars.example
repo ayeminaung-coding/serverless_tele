@@ -1,0 +1,4 @@
+# Local secrets for `wrangler dev`. Never commit the real file.
+R2_ACCESS_KEY_ID=""
+R2_SECRET_ACCESS_KEY=""
+TELEGRAM_BOT_TOKEN=""

@@ -1,0 +1,27 @@
+name = "telegram-serverless"
+main = "src/index.ts"
+compatibility_date = "2025-10-01"
+
+# D1 state: assets, channels, jobs, series, schedule slots.
+# Create once with `npm run db:create`, then paste the returned
+# database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "telegram-serverless"
+database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+
+# R2 media. The Worker uses the S3-compatible endpoint (aws4fetch) to mint
+# presigned PUTs, and the MEDIA binding to HEAD/verify uploaded objects.
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "telegram-serverless-media"
+
+# Schedule heartbeat. Replaces n8n's slot-tick: one trigger, handled by the
+# `scheduled` handler in src/index.ts (full tick logic lands in T6).
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+R2_ACCOUNT_ID = ""
+R2_BUCKET = "telegram-serverless-media"
+R2_PUBLIC_BASE_URL = ""
