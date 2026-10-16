@@ -88,7 +88,7 @@ import {
   validateUploadIntent,
 } from "./validation";
 
-export const VERSION = "0.1.0";
+const VERSION = "0.1.0";
 
 export interface Env {
   DB: D1Database;

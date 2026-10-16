@@ -26,9 +26,9 @@ no chunked resumable uploads, no ffmpeg.
 - [x] T3 — Telegram `sendVideo` client + channels CRUD
 - [x] T4 — caption render (template + hook, 1024 cap) + preview
 - [x] T5 — series CRUD + parts + per-series channel pick
-- [ ] T6 — slots + ordered backlog + tick release
-- [ ] T7 — console wiring (Pages build against this API)
-- [ ] T8 — full test/docs pass + live verification checklist
+- [x] T6 — slots + ordered backlog + tick release
+- [x] T7 — console wiring (Pages build against this API)
+- [x] T8 — full test/docs pass + live verification checklist
 
 ## Setup
 
@@ -52,14 +52,15 @@ npx wrangler secret put R2_SECRET_ACCESS_KEY
 npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
 ```
 
-## API (T1–T5)
+## API
 
 - `GET /healthz` → `{status, version}`
 - `POST /assets/upload-url` `{filename, content_type?, size_bytes?}` →
   `{storage_key, upload_url, expires_seconds}` (rejects non-`.mp4`, wrong
   content type, declared size >50 MB)
 - `POST /assets` `{storage_key}` → `201` asset (verifies via R2 HEAD;
-  oversized objects are deleted and rejected with 413)
+  oversized objects are deleted and rejected with 413; re-registering the
+  same key returns the existing asset with `200`)
 - `GET /channels` → `[{id, label, chat_id, is_public, protect_content, enabled, created_at}]`
 - `POST /channels` `{label, chat_id, is_public?, protect_content?, enabled?}` → `201`
   channel (`chat_id` is `@handle` or numeric `-100…`; duplicates → `409`)
@@ -85,10 +86,42 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN   # used from T3 on
   (asset must exist; `part_index` unique per series → `409`; asset one-part-only → `409`)
 - `GET|PATCH|DELETE /series/:id/parts/:partId` → detail / edit hook+index / detach
 - `GET /series/:id/parts/:partId/caption` → this episode's rendered caption via T4 engine
+- `GET /slots` → posting rhythm, seeded lunch/evening/night (`Asia/Bangkok`)
+- `PATCH /slots/:id` `{label?, hour?, minute?, timezone?, enabled?}` → retuned slot
+  or `404` (`400` on bad hour/minute/timezone; empty patch → `400`)
+- `GET /jobs?state=&series_id=&channel_id=&limit=` → enriched jobs, oldest first
+  (`state` ∈ scheduled/published/failed; `limit` default 50, max 200)
+- `POST /jobs/:id/retry` → re-dispatches a `failed` job (`404` unknown job;
+  `409` unless failed; `404` when its channel/part/series/asset is gone)
+- `POST /tick` → `{fired_slots, jobs_created, published, failed, deferred, errors}`
+  (due slots → next unreleased episode per series+channel → send; safe any time,
+  no due slot → zeros; same core as the 15-minute Cron `scheduled` handler)
 
-## Verify this slice
+Errors are always `{ error: { code, message } }`; see
+[docs/LIVE_CHECKLIST.md](docs/LIVE_CHECKLIST.md) §9 for the full code map.
+
+## Console
+
+Static operator UI in [`console/`](console/README.md) (Cloudflare Pages, no
+build): Assets → Channels → Series → Captions → Schedule. Copy
+`console/config.example.js` to `console/config.js` with your Worker URL, then
+`npx wrangler pages deploy console`. No auth by design — put it behind
+Cloudflare Access.
+
+## Verify
 
 ```bash
 npm run typecheck
 npm test
 ```
+
+End-to-end against a dev or deployed Worker (needs a real `.mp4` for the byte
+leg; without one the script prints the manual PUT and skips
+register/attach/caption):
+
+```bash
+BASE=http://127.0.0.1:8787 MP4_PATH=./ep1.mp4 ./scripts/smoke.sh
+```
+
+One-time production runbook: [docs/LIVE_CHECKLIST.md](docs/LIVE_CHECKLIST.md)
+(secrets, D1, R2 domain, deploys, bot-admin steps, first real release).
